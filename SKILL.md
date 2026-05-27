@@ -1,6 +1,6 @@
 ---
 name: lite-mode
-description: "Optimize ClojureScript builds for :lite-mode + :elide-to-string. Diagnose what leaked, fix banned functions, understand data structure mechanics. Entrypoint: bb ~/lite-mode-skill/lite.bb"
+description: "Optimize ClojureScript builds for :lite-mode + :elide-to-string. Diagnose what leaked, fix banned functions, understand data structure mechanics. Entrypoint: bb lite.bb"
 user-invocable: true
 ---
 
@@ -11,7 +11,8 @@ the actual `cljs/core.cljs` source (read directly; see `types.md`).
 Claims marked ⚠️ are from empirical measurement and may drift across CLJS versions.
 
 When this skill is invoked, run `validate` immediately to check requirements and list
-available shadow-cljs builds, then proceed to diagnose the build. Do not ask the user
+available shadow-cljs builds. If `.cljs-lite-skill/` exists and contains stale slots,
+run `clean` before building. Then proceed to diagnose the build. Do not ask the user
 what they want — diagnosing the codebase for lite-mode optimization is the task.
 
 ---
@@ -31,17 +32,17 @@ what they want — diagnosing the codebase for lite-mode optimization is the tas
 
 ```bash
 # First, see what builds are available:
-bb ~/lite-mode-skill/lite.bb validate
+bb lite.bb validate
 
 # Build both measure + diagnostic slots in one command:
-bb ~/lite-mode-skill/lite.bb build latest <build-name> [cmd-prefix…]
-# e.g.: bb ~/lite-mode-skill/lite.bb build latest app clojure -M:demo:shadow
+bb lite.bb build latest <build-name> [cmd-prefix…]
+# e.g.: bb lite.bb build latest app clojure -M:demo:shadow
 ```
 
 This runs two shadow-cljs release builds linked by a shared gensym (e.g. `1234`):
-- `target/lite-diag/latest-1234/` — measure build: no pseudo-names, accurate production size
-- `target/lite-diag/diag-1234/` — diagnostic build: pseudo-names + source-map, readable names
-- `target/lite-diag/latest.latest` — pointer file containing `1234`
+- `.cljs-lite-skill/latest-1234/` — measure build: no pseudo-names, accurate production size
+- `.cljs-lite-skill/diag-1234/` — diagnostic build: pseudo-names + source-map, readable names
+- `.cljs-lite-skill/latest.latest` — pointer file containing `1234`
 
 **Never measure size from diagnostic slots.** Pseudo-names inflate the artifact 5-10×. The
 gensym links each pair so `check` and `diff` always use the right slot for each purpose.
@@ -49,7 +50,7 @@ gensym links each pair so `check` and `diff` always use the right slot for each 
 ### Step 2 — Analyse
 
 ```bash
-bb ~/lite-mode-skill/lite.bb check latest
+bb lite.bb check latest
 # (default label is latest, so bare `check` works too)
 ```
 
@@ -71,10 +72,10 @@ Produces a report with four sections:
 ### Step 2b — A/B comparison
 
 ```bash
-bb ~/lite-mode-skill/lite.bb build before <build-name> [cmd-prefix…]
+bb lite.bb build before <build-name> [cmd-prefix…]
 # ... make changes ...
-bb ~/lite-mode-skill/lite.bb build after  <build-name> [cmd-prefix…]
-bb ~/lite-mode-skill/lite.bb diff before after
+bb lite.bb build after  <build-name> [cmd-prefix…]
+bb lite.bb diff before after
 ```
 
 Each `build` creates a linked measure+diagnostic pair. `diff` uses:
@@ -259,11 +260,10 @@ Clojure-readable output (but note: `pr-str` pulls in the printer).
 
 | File | Purpose |
 |---|---|
-| `~/lite-mode-skill/lite.bb` | Standalone diagnostic script |
-| `~/lite-mode-skill/types.md` | Exact data structure implementation reference |
-| `~/lite-mode-skill/guide.md` | Deep reference with core.cljs line numbers |
-| `~/lite-mode-skill/setup.md` | How to add diagnostic build to a project |
-| `shadow-cljs.edn` `:app-diag` | Diagnostic build config (all four options locked in) |
-| `target/lite-diag/<label>-<sym>/` | Measure slot — production-equivalent size |
-| `target/lite-diag/diag-<sym>/` | Diagnostic slot — pseudo-names, readable names |
-| `target/lite-diag/<label>.latest` | Pointer to current gensym for that label |
+| `lite.bb` | Standalone diagnostic script |
+| `types.md` | Exact data structure implementation reference |
+| `guide.md` | Deep reference with core.cljs line numbers |
+| `setup.md` | How to add diagnostic build to a project |
+| `.cljs-lite-skill/<label>-<sym>/` | Measure slot — production-equivalent size |
+| `.cljs-lite-skill/diag-<sym>/` | Diagnostic slot — pseudo-names, readable names |
+| `.cljs-lite-skill/<label>.latest` | Pointer to current gensym for that label |

@@ -8,12 +8,12 @@
 ;;   diff  <a> <b>                   compare two labels: size from measure, analysis from diag
 ;;
 ;; build writes two slots per label, linked by a shared gensym:
-;;   target/lite-diag/<label>-<sym>/   measure build  (no pseudo-names; accurate size)
-;;   target/lite-diag/diag-<sym>/      diagnostic build (pseudo-names; readable names)
-;;   target/lite-diag/<label>.latest   pointer file containing <sym>
+;;   .cljs-lite-skill/<label>-<sym>/   measure build  (no pseudo-names; accurate size)
+;;   .cljs-lite-skill/diag-<sym>/      diagnostic build (pseudo-names; readable names)
+;;   .cljs-lite-skill/<label>.latest   pointer file containing <sym>
 ;;
 ;; Example:
-;;   bb /path/to/lite.bb build latest app clojure -M:demo:shadow
+;;   bb ~/cljs-lite-skill/lite.bb build latest app clojure -M:demo:shadow
 
 (ns lite
   (:require [babashka.fs :as fs]
@@ -117,7 +117,7 @@
                (sort-by (juxt :file :line))))))))
 
 (defn latest-file [label]
-  (str "target/lite-diag/" label ".latest"))
+  (str ".cljs-lite-skill/" label ".latest"))
 
 (defn read-latest [label]
   (let [f (latest-file label)]
@@ -161,7 +161,7 @@
   (when-not (fs/exists? "shadow-cljs.edn")
     (println "No shadow-cljs.edn found.")
     (System/exit 1))
-  (let [slot-dir  (str "target/lite-diag/" slot-label)
+  (let [slot-dir  (str ".cljs-lite-skill/" slot-label)
         merge-cfg {:compiler-options compiler-options
                    :output-dir       slot-dir}
         prefix    (if (seq cmd-prefix) (vec cmd-prefix) ["npx" "shadow-cljs"])
@@ -176,6 +176,12 @@
         (print (str "  Done: " (size-kb (str js))))
         (when (fs/exists? br) (print (str "  " (size-kb br) " brotli")))
         (println)))))
+
+(defn clean! []
+  (if (fs/exists? ".cljs-lite-skill")
+    (do (fs/delete-tree ".cljs-lite-skill")
+        (println "Cleaned .cljs-lite-skill/"))
+    (println "Nothing to clean.")))
 
 (defn build! [label build-name cmd-prefix]
   (let [sym          (str (gensym nil))
@@ -193,7 +199,7 @@
 (defn analyze-slot
   "Returns analysis results for a slot, or exits if no artifact found."
   [slot-label]
-  (let [slot-dir (str "target/lite-diag/" slot-label)
+  (let [slot-dir (str ".cljs-lite-skill/" slot-label)
         js-path  (first (fs/glob slot-dir "*.js"))
         map-path (first (fs/glob slot-dir "*.js.map"))]
     (when-not (and js-path (fs/exists? js-path))
@@ -314,12 +320,14 @@
 (let [[cmd & args] *command-line-args*]
   (case cmd
     "validate" (validate!)
+    "clean"    (clean!)
     "build"    (let [[label build-name cmd-prefix] (parse-build-args args "build")]
                  (build! label build-name cmd-prefix))
     "check"    (check! (or (first args) "latest"))
     "diff"     (diff! (first args) (second args))
     (println "Usage: bb lite.bb <command> [args...]
   validate                       list available browser builds
+  clean                          remove all slots (.cljs-lite-skill/)
   build <label> <build> [cmd…]   compile measure + diagnostic slots linked by gensym
   check [label]                  analyze diagnostic slot for label (default: latest)
   diff  <a> <b>                  compare two labels: size from measure, analysis from diag")))
