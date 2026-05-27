@@ -1,1 +1,3 @@
-To use, ask an AI assistant to read `skill.md`
+# Usage
+- Clone this repo locally
+- Ask an AI assistant to read `skill.md`
