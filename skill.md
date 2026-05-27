@@ -27,29 +27,33 @@ what they want — diagnosing the codebase for lite-mode optimization is the tas
 
 ## The Diagnostic Loop
 
-### Step 1 — Build the diagnostic artifact
+### Step 1 — Build
 
 ```bash
 # First, see what builds are available:
 bb ~/lite-mode-skill/lite.bb validate
 
-# Build with pseudo-names + source-map for diagnosis:
-bb ~/lite-mode-skill/lite.bb build-diagnostic latest <build-name> [cmd-prefix…]
-# e.g.: bb ~/lite-mode-skill/lite.bb build-diagnostic latest app clojure -M:demo:shadow
+# Build both measure + diagnostic slots in one command:
+bb ~/lite-mode-skill/lite.bb build latest <build-name> [cmd-prefix…]
+# e.g.: bb ~/lite-mode-skill/lite.bb build latest app clojure -M:demo:shadow
 ```
 
-Injects `:lite-mode`, `:elide-to-string`, `:pseudo-names`, `:source-map` via `--config-merge`.
-Output goes to `target/lite-diag/latest/`. The `:pseudo-names` flag keeps mangled names
-readable — e.g. `cljs$core$PersistentVector$$` instead of `a` — so leaks are visible.
+This runs two shadow-cljs release builds linked by a shared gensym (e.g. `1234`):
+- `target/lite-diag/latest-1234/` — measure build: no pseudo-names, accurate production size
+- `target/lite-diag/diag-1234/` — diagnostic build: pseudo-names + source-map, readable names
+- `target/lite-diag/latest.latest` — pointer file containing `1234`
 
-Note: artifact is 5-10× larger than production because of `:pseudo-names`. Use
-`build-measure` for true size numbers.
+**Never measure size from diagnostic slots.** Pseudo-names inflate the artifact 5-10×. The
+gensym links each pair so `check` and `diff` always use the right slot for each purpose.
 
 ### Step 2 — Analyse
 
 ```bash
 bb ~/lite-mode-skill/lite.bb check latest
+# (default label is latest, so bare `check` works too)
 ```
+
+Reads `latest.latest` to find the gensym, then analyzes the `diag-<sym>/` slot.
 
 Produces a report with four sections:
 
@@ -64,20 +68,18 @@ Produces a report with four sections:
 
 4. **Name count** — total mangled-name count. Fewer names ≈ more DCE.
 
-### Step 2b — A/B size comparison
+### Step 2b — A/B comparison
 
 ```bash
-bb ~/lite-mode-skill/lite.bb build-measure before <build-name> [cmd-prefix…]
+bb ~/lite-mode-skill/lite.bb build before <build-name> [cmd-prefix…]
 # ... make changes ...
-bb ~/lite-mode-skill/lite.bb build-measure after  <build-name> [cmd-prefix…]
+bb ~/lite-mode-skill/lite.bb build after  <build-name> [cmd-prefix…]
 bb ~/lite-mode-skill/lite.bb diff before after
 ```
 
-`build-measure` injects only `:lite-mode` + `:elide-to-string` — no pseudo-names, so
-brotli sizes reflect production reality.
-
-The diff shows size delta, which leaked types were fixed/added, which banned functions
-changed, and name count delta.
+Each `build` creates a linked measure+diagnostic pair. `diff` uses:
+- measure slots (`before-<sym>`, `after-<sym>`) for accurate brotli size delta
+- diagnostic slots (`diag-<sym>`, `diag-<sym>`) for leaked types, banned functions, name count delta
 
 ### Step 3 — Fix
 
@@ -262,4 +264,6 @@ Clojure-readable output (but note: `pr-str` pulls in the printer).
 | `~/lite-mode-skill/guide.md` | Deep reference with core.cljs line numbers |
 | `~/lite-mode-skill/setup.md` | How to add diagnostic build to a project |
 | `shadow-cljs.edn` `:app-diag` | Diagnostic build config (all four options locked in) |
-| `target/lite-diag/<label>/` | Build slot — JS + source map + brotli |
+| `target/lite-diag/<label>-<sym>/` | Measure slot — production-equivalent size |
+| `target/lite-diag/diag-<sym>/` | Diagnostic slot — pseudo-names, readable names |
+| `target/lite-diag/<label>.latest` | Pointer to current gensym for that label |

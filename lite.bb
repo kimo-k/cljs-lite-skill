@@ -3,12 +3,14 @@
 ;;
 ;; Usage: bb /path/to/lite.bb <command> [args...]
 ;;   validate                        list browser builds in shadow-cljs.edn
-;;   build <label> <build> [cmd…]    compile → target/lite-diag/<label>/
-;;   check [label]                   analyze build slot (default: latest)
-;;   diff  <a> <b>                   compare two build slots
+;;   build <label> <build> [cmd…]    compile both measure + diagnostic slots
+;;   check [label]                   analyze diagnostic slot for label (default: latest)
+;;   diff  <a> <b>                   compare two labels: size from measure, analysis from diag
 ;;
-;; build injects all diagnostic options via --config-merge — no shadow-cljs.edn changes needed.
-;; The cmd prefix is how to invoke shadow-cljs in this project (default: npx shadow-cljs).
+;; build writes two slots per label, linked by a shared gensym:
+;;   target/lite-diag/<label>-<sym>/   measure build  (no pseudo-names; accurate size)
+;;   target/lite-diag/diag-<sym>/      diagnostic build (pseudo-names; readable names)
+;;   target/lite-diag/<label>.latest   pointer file containing <sym>
 ;;
 ;; Example:
 ;;   bb /path/to/lite.bb build latest app clojure -M:demo:shadow
@@ -114,6 +116,16 @@
                        :fn-name (str name)}))
                (sort-by (juxt :file :line))))))))
 
+(defn latest-file [label]
+  (str "target/lite-diag/" label ".latest"))
+
+(defn read-latest [label]
+  (let [f (latest-file label)]
+    (when-not (fs/exists? f)
+      (println (str "ERROR: no slot for label '" label "' — run 'build " label " <build-name>' first."))
+      (System/exit 1))
+    (str/trim (slurp f))))
+
 ;; ---- commands ----
 
 (defn check-path [tool]
@@ -145,40 +157,47 @@
             (println "  cmd-prefix defaults to: clojure -M -m shadow.cljs.devtools.cli")
             (println "  example:  bb lite.bb build latest app clojure -M:demo:shadow"))))))
 
-(defn run-build! [label compiler-options build-name cmd-prefix]
+(defn run-build! [slot-label compiler-options build-name cmd-prefix]
   (when-not (fs/exists? "shadow-cljs.edn")
     (println "No shadow-cljs.edn found.")
     (System/exit 1))
-  (let [slot-dir  (str "target/lite-diag/" label)
+  (let [slot-dir  (str "target/lite-diag/" slot-label)
         merge-cfg {:compiler-options compiler-options
                    :output-dir       slot-dir}
         prefix    (if (seq cmd-prefix) (vec cmd-prefix) ["npx" "shadow-cljs"])
         cmd       (conj prefix "release" build-name "--config-merge" (pr-str merge-cfg))]
-    (println (str "Building " build-name " → " slot-dir " …"))
+    (println (str "  Building → " slot-dir " …"))
     (fs/create-dirs slot-dir)
     (apply proc/shell cmd)
     (doseq [js (fs/glob slot-dir "*.js")]
       (jsh/sh "brotli" "-9" "-f" (str js) "-o" (str js ".br")))
     (when-let [js (first (fs/glob slot-dir "*.js"))]
       (let [br (str js ".br")]
-        (print (str "Done: " (size-kb (str js))))
+        (print (str "  Done: " (size-kb (str js))))
         (when (fs/exists? br) (print (str "  " (size-kb br) " brotli")))
         (println)))))
 
-(defn build-diagnostic! [label build-name cmd-prefix]
-  (run-build! label +diag-compiler-options+ build-name cmd-prefix))
-
-(defn build-measure! [label build-name cmd-prefix]
-  (run-build! label +measure-compiler-options+ build-name cmd-prefix))
+(defn build! [label build-name cmd-prefix]
+  (let [sym          (str (gensym nil))
+        measure-slot (str label "-" sym)
+        diag-slot    (str "diag-" sym)]
+    (fs/create-dirs "target/lite-diag")
+    (println (str "Building " build-name " [" sym "] …"))
+    (println "  [measure]")
+    (run-build! measure-slot +measure-compiler-options+ build-name cmd-prefix)
+    (println "  [diagnostic]")
+    (run-build! diag-slot +diag-compiler-options+ build-name cmd-prefix)
+    (spit (latest-file label) sym)
+    (println (str "Slots: " measure-slot "  |  " diag-slot))))
 
 (defn analyze-slot
   "Returns analysis results for a slot, or exits if no artifact found."
-  [label]
-  (let [slot-dir (str "target/lite-diag/" label)
+  [slot-label]
+  (let [slot-dir (str "target/lite-diag/" slot-label)
         js-path  (first (fs/glob slot-dir "*.js"))
         map-path (first (fs/glob slot-dir "*.js.map"))]
     (when-not (and js-path (fs/exists? js-path))
-      (println (str "No artifact in slot '" label "' — run 'build " label " <build-name>' first."))
+      (println (str "No artifact in slot '" slot-label "' — run 'build' first."))
       (System/exit 1))
     (let [js    (slurp (str js-path))
           names (extract-names js)
@@ -219,29 +238,36 @@
   (println (str "Names: " (count names))))
 
 (defn check! [label]
-  (print-check label (analyze-slot label)))
+  (let [sym (read-latest label)]
+    (print-check label (analyze-slot (str "diag-" sym)))))
 
 (defn diff! [label-a label-b]
   (when-not (and label-a label-b)
     (println "Usage: bb lite.bb diff <a> <b>")
     (System/exit 1))
-  (let [a (analyze-slot label-a)
-        b (analyze-slot label-b)]
-    (println (str "\n=== diff: " label-a " → " label-b " ===\n"))
-    (let [sa (fs/size (:js-path a))
-          sb (fs/size (:js-path b))
+  (let [sym-a     (read-latest label-a)
+        sym-b     (read-latest label-b)
+        measure-a (analyze-slot (str label-a "-" sym-a))
+        measure-b (analyze-slot (str label-b "-" sym-b))
+        diag-a    (analyze-slot (str "diag-" sym-a))
+        diag-b    (analyze-slot (str "diag-" sym-b))]
+    (println (str "\n=== diff: " label-a " [" sym-a "] → " label-b " [" sym-b "] ===\n"))
+    ;; size from measure slots
+    (let [sa (fs/size (:js-path measure-a))
+          sb (fs/size (:js-path measure-b))
           d  (- sb sa)]
-      (print (str "JS: " (size-kb (:js-path a)) " → " (size-kb (:js-path b))
+      (print (str "JS: " (size-kb (:js-path measure-a)) " → " (size-kb (:js-path measure-b))
                   " (" (if (neg? d) "-" "+") (int (/ (Math/abs d) 1024)) "k)"))
-      (when (and (:br-path a) (:br-path b))
-        (let [bra (fs/size (:br-path a))
-              brb (fs/size (:br-path b))
+      (when (and (:br-path measure-a) (:br-path measure-b))
+        (let [bra (fs/size (:br-path measure-a))
+              brb (fs/size (:br-path measure-b))
               bd  (- brb bra)]
-          (print (str " | brotli: " (size-kb (:br-path a)) " → " (size-kb (:br-path b))
+          (print (str " | brotli: " (size-kb (:br-path measure-a)) " → " (size-kb (:br-path measure-b))
                       " (" (if (neg? bd) "-" "+") (int (/ (Math/abs bd) 1024)) "k)"))))
       (println))
-    (let [la (set (:leaked a))
-          lb (set (:leaked b))]
+    ;; leaked types from diag slots
+    (let [la (set (:leaked diag-a))
+          lb (set (:leaked diag-b))]
       (cond
         (and (empty? la) (empty? lb)) (println "Leaked: CLEAN (both)")
         (empty? lb)                   (println "Leaked: DIRTY -> CLEAN")
@@ -251,8 +277,9 @@
             (run! (fn [n] (println (str "  FIXED: " n))) (sort (set/difference la lb)))
             (run! (fn [n] (println (str "  NEW:   " n))) (sort (set/difference lb la)))))
       (println))
-    (let [ba    (into #{} (keys (:found-banned a)))
-          bb    (into #{} (keys (:found-banned b)))
+    ;; banned functions from diag slots
+    (let [ba    (into #{} (keys (:found-banned diag-a)))
+          bb    (into #{} (keys (:found-banned diag-b)))
           fixed (set/difference ba bb)
           added (set/difference bb ba)]
       (when (or (seq fixed) (seq added))
@@ -260,8 +287,9 @@
         (run! (fn [k] (println (str "  FIXED: " k))) (sort fixed))
         (run! (fn [k] (println (str "  NEW:   " k))) (sort added))
         (println)))
-    (let [na  (:names a)
-          nb  (:names b)
+    ;; name count from diag slots
+    (let [na  (:names diag-a)
+          nb  (:names diag-b)
           rm  (set/difference na nb)
           add (set/difference nb na)]
       (println (str "Names: " (count na) " -> " (count nb)
@@ -285,16 +313,13 @@
 
 (let [[cmd & args] *command-line-args*]
   (case cmd
-    "validate"         (validate!)
-    "build-diagnostic" (let [[label build-name cmd-prefix] (parse-build-args args "build-diagnostic")]
-                         (build-diagnostic! label build-name cmd-prefix))
-    "build-measure"    (let [[label build-name cmd-prefix] (parse-build-args args "build-measure")]
-                         (build-measure! label build-name cmd-prefix))
-    "check"            (check! (or (first args) "latest"))
-    "diff"             (diff! (first args) (second args))
+    "validate" (validate!)
+    "build"    (let [[label build-name cmd-prefix] (parse-build-args args "build")]
+                 (build! label build-name cmd-prefix))
+    "check"    (check! (or (first args) "latest"))
+    "diff"     (diff! (first args) (second args))
     (println "Usage: bb lite.bb <command> [args...]
-  validate                                list available browser builds
-  build-diagnostic <label> <build> [cmd…] compile with pseudo-names+source-map → target/lite-diag/<label>/
-  build-measure    <label> <build> [cmd…] compile production-equivalent → target/lite-diag/<label>/
-  check [label]                           analyze diagnostic slot (default: latest)
-  diff  <a> <b>                           compare two measure slots by size")))
+  validate                       list available browser builds
+  build <label> <build> [cmd…]   compile measure + diagnostic slots linked by gensym
+  check [label]                  analyze diagnostic slot for label (default: latest)
+  diff  <a> <b>                  compare two labels: size from measure, analysis from diag")))
