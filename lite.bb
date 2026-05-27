@@ -6,6 +6,7 @@
 ;;   build <label> <build> [--exp <n>] [cmd…]   compile both measure + diagnostic slots
 ;;   check [label]                               analyze diagnostic slot for label (default: advanced)
 ;;   diff  <a> <b>                               compare two labels: size from measure, analysis from diag
+;;   report [label]                              post-DCE bytes per source from measure slot's report.html
 ;;
 ;; State is tracked in .cljs-lite-skill/latest.edn:
 ;;   {:latest 2
@@ -63,15 +64,17 @@
 
 (def +dirty-pattern+ (re-pattern "Persistent|ChunkedSeq|ChunkedCons"))
 
-(def +diag-compiler-options+
-  {:lite-mode       true
-   :elide-to-string true
-   :pseudo-names    true
-   :source-map      true})
+(def +diag-build-opts
+  '{:compiler-options {:lite-mode       true
+                      :elide-to-string true
+                      :pseudo-names    true
+                      :source-map      true}})
 
-(def +measure-compiler-options+
-  {:lite-mode       true
-   :elide-to-string true})
+(def +measure-build-opts
+  '{:compiler-options {:lite-mode       true
+                       :elide-to-string true}
+    :build-hooks
+    [(shadow.cljs.build-report/hook)]})
 
 ;; ---- state ----
 
@@ -147,6 +150,18 @@
                        :fn-name (str name)}))
                (sort-by (juxt :file :line))))))))
 
+;; ---- report parsing ----
+
+(defn parse-report-edn [html-path]
+  (let [html  (slurp html-path)
+        tag   "<script type=\"shadow/build-report\">"
+        start (.indexOf html tag)]
+    (when (neg? start)
+      (println (str "No shadow/build-report script tag found in " html-path))
+      (System/exit 1))
+    (let [end (.indexOf html "</script>" start)]
+      (read-string (subs html (+ start (count tag)) end)))))
+
 ;; ---- commands ----
 
 (defn check-path [tool]
@@ -178,13 +193,12 @@
             (println "  cmd-prefix defaults to: clojure -M -m shadow.cljs.devtools.cli")
             (println "  example:  bb lite.bb build advanced app clojure -M:demo:shadow"))))))
 
-(defn run-build! [slot-label compiler-options build-name cmd-prefix]
+(defn run-build! [slot-label build-opts build-name cmd-prefix]
   (when-not (fs/exists? "shadow-cljs.edn")
     (println "No shadow-cljs.edn found.")
     (System/exit 1))
   (let [slot-dir  (str ".cljs-lite-skill/" slot-label)
-        merge-cfg {:compiler-options compiler-options
-                   :output-dir       slot-dir}
+        merge-cfg (merge build-opts {:output-dir slot-dir})
         prefix    (if (seq cmd-prefix) (vec cmd-prefix) ["npx" "shadow-cljs"])
         cmd       (conj prefix "release" build-name "--config-merge" (pr-str merge-cfg))]
     (println (str "  Building → " slot-dir " …"))
@@ -211,9 +225,9 @@
         diag-slot    (str "diag-" label "-" n)]
     (println (str "Building " build-name " [exp " n "] …"))
     (println "  [measure]")
-    (run-build! measure-slot +measure-compiler-options+ build-name cmd-prefix)
+    (run-build! measure-slot +measure-build-opts build-name cmd-prefix)
     (println "  [diagnostic]")
-    (run-build! diag-slot +diag-compiler-options+ build-name cmd-prefix)
+    (run-build! diag-slot +diag-build-opts build-name cmd-prefix)
     (write-state (-> state
                      (assoc :latest n)
                      (assoc-in [n (keyword label)] {:measure measure-slot :diag diag-slot})))
@@ -334,6 +348,33 @@
         (println "  Added:")
         (run! (fn [n] (println (str "    " n))) (sort add))))))
 
+(defn report! [label]
+  (let [{:keys [measure]} (get-slots label)
+        html-path (str ".cljs-lite-skill/" measure "/report.html")]
+    (when-not (fs/exists? html-path)
+      (println (str "No report.html in " measure " — rebuild first (measure builds write the report)."))
+      (System/exit 1))
+    (let [data      (parse-report-edn html-path)
+          module    (first (:build-modules data))
+          src-bytes (:source-bytes module)
+          src-info  (into {} (map (fn [s] [(:resource-name s) s]) (:build-sources data)))
+          entries   (->> src-bytes
+                         (filter (fn [[_ sz]] (pos? sz)))
+                         (sort-by val >))
+          total     (reduce + (map val entries))
+          col-w     58]
+      (println (str "\n=== report: " measure " (post-DCE bytes) ===\n"))
+      (println (format (str "%-" col-w "s  %7s  %s") "source" "bytes" "type"))
+      (println (str/join "" (repeat (+ col-w 22) "-")))
+      (doseq [[rname sz] entries]
+        (let [{:keys [type fs-root]} (src-info rname)
+              tag (cond fs-root (str (name type) " [" fs-root "]")
+                        type    (name type)
+                        :else   "?")]
+          (println (format (str "%-" col-w "s  %7d  %s") rname sz tag))))
+      (println (str/join "" (repeat (+ col-w 22) "-")))
+      (println (format (str "%-" col-w "s  %7d") "TOTAL" total)))))
+
 ;; ---- dispatch ----
 
 (defn parse-build-args [args]
@@ -357,9 +398,11 @@
                  (build! label build-name exp-num cmd-prefix))
     "check"    (check! (or (first args) "advanced"))
     "diff"     (diff! (first args) (second args))
+    "report"   (report! (or (first args) "advanced"))
     (println "Usage: bb lite.bb <command> [args...]
   validate                                   list available browser builds
   clean                                      remove all slots (.cljs-lite-skill/)
   build <label> <build> [--exp <n>] [cmd…]  compile measure + diagnostic slots
   check [label]                              analyze diagnostic slot for label (default: advanced)
-  diff  <a> <b>                              compare two labels in current experiment")))
+  diff  <a> <b>                              compare two labels in current experiment
+  report [label]                             post-DCE bytes per source (default: advanced)")))

@@ -83,6 +83,8 @@ Produces a report with four sections:
 
 3. **Source violations (clj-kondo)** — uses the source map to identify only actually-compiled
    project files, then runs clj-kondo on those files. No false positives from DCE'd namespaces.
+   Only report violations that match the banned functions list. Ignore all other kondo output —
+   general linting warnings are not relevant here.
 
 4. **Name count** — total mangled-name count. Fewer names ≈ more DCE.
 
@@ -111,6 +113,36 @@ bb lite.bb diff before after
 
 Apply replacements from the tables below. Rebuild and re-check until the report shows
 CLEAN with zero banned functions.
+
+### Step 2c — Per-source byte breakdown
+
+```bash
+bb lite.bb report advanced
+# (default label is advanced, so bare `report` works too)
+```
+
+Parses the `report.html` written into the measure slot during build. Extracts the
+`shadow/build-report` EDN embedded in a `<script>` tag and prints **post-DCE bytes per
+source**, sorted descending. Zero-byte entries are filtered out.
+
+Example output:
+```
+=== report: advanced-5 (post-DCE bytes) ===
+
+source                                                        bytes  type
+------------------------------------------------------------------------
+cljs/core.cljs                                                47302  cljs
+goog/string/stringbuffer.js                                     308  goog
+nextjournal/offworld/demo/main.cljs                             258  cljs [src]
+------------------------------------------------------------------------
+TOTAL                                                         48346
+```
+
+The `type` column shows `cljs`, `goog`, or `?`, with a `[fs-root]` suffix for project
+sources so you can distinguish your code from library code.
+
+Use this when the build is CLEAN but still larger than expected — `check` tells you
+what leaked or what's banned, but `report` tells you which namespace is dominating.
 
 ### Step 4 — Measure production size
 
@@ -289,6 +321,6 @@ Clojure-readable output (but note: `pr-str` pulls in the printer).
 | `types.md` | Exact data structure implementation reference |
 | `guide.md` | Deep reference with core.cljs line numbers |
 | `setup.md` | How to add diagnostic build to a project |
-| `.cljs-lite-skill/<label>-<n>/` | Measure slot — production-equivalent size |
+| `.cljs-lite-skill/<label>-<n>/` | Measure slot — production-equivalent size + `report.html` |
 | `.cljs-lite-skill/diag-<label>-<n>/` | Diagnostic slot — pseudo-names, readable names |
 | `.cljs-lite-skill/latest.edn` | State file: experiment history and current `:latest` |
