@@ -2,18 +2,22 @@
 ;; lite.bb — standalone lite-mode diagnostic tool for ClojureScript projects
 ;;
 ;; Usage: bb /path/to/lite.bb <command> [args...]
-;;   validate                        list browser builds in shadow-cljs.edn
-;;   build <label> <build> [cmd…]    compile both measure + diagnostic slots
-;;   check [label]                   analyze diagnostic slot for label (default: latest)
-;;   diff  <a> <b>                   compare two labels: size from measure, analysis from diag
+;;   validate                                    list browser builds in shadow-cljs.edn
+;;   build <label> <build> [--exp <n>] [cmd…]   compile both measure + diagnostic slots
+;;   check [label]                               analyze diagnostic slot for label (default: advanced)
+;;   diff  <a> <b>                               compare two labels: size from measure, analysis from diag
 ;;
-;; build writes two slots per label, linked by a shared gensym:
-;;   .cljs-lite-skill/<label>-<sym>/   measure build  (no pseudo-names; accurate size)
-;;   .cljs-lite-skill/diag-<sym>/      diagnostic build (pseudo-names; readable names)
-;;   .cljs-lite-skill/<label>.latest   pointer file containing <sym>
+;; State is tracked in .cljs-lite-skill/latest.edn:
+;;   {:latest 2
+;;    1 {:before {:measure "before-1" :diag "diag-before-1"}
+;;       :after  {:measure "after-1"  :diag "diag-after-1"}}
+;;    2 {:advanced {:measure "advanced-2" :diag "diag-advanced-2"}}}
+;;
+;; Each build defaults to a new experiment (increments :latest). Pass --exp <n> to
+;; add a label to an existing experiment instead.
 ;;
 ;; Example:
-;;   bb ~/cljs-lite-skill/lite.bb build latest app clojure -M:demo:shadow
+;;   bb ~/cljs-lite-skill/lite.bb build advanced app clojure -M:demo:shadow
 
 (ns lite
   (:require [babashka.fs :as fs]
@@ -69,6 +73,31 @@
   {:lite-mode       true
    :elide-to-string true})
 
+;; ---- state ----
+
+(def state-file ".cljs-lite-skill/latest.edn")
+
+(defn read-state []
+  (if (fs/exists? state-file)
+    (read-string (slurp state-file))
+    {:latest 0}))
+
+(defn write-state [state]
+  (fs/create-dirs ".cljs-lite-skill")
+  (spit state-file (pr-str state)))
+
+(defn get-slots
+  "Look up measure+diag slot names for label in experiment n (defaults to :latest)."
+  ([label] (get-slots label nil))
+  ([label exp-num]
+   (let [state (read-state)
+         n     (or exp-num (:latest state))
+         slots (get-in state [n (keyword label)])]
+     (when-not slots
+       (println (str "ERROR: no slot for label '" label "' in experiment " n " — run 'build' first."))
+       (System/exit 1))
+     slots)))
+
 ;; ---- helpers ----
 
 (defn size-kb [path]
@@ -101,12 +130,14 @@
       (when (seq files)
         (let [args   (into ["clj-kondo"
                             "--config" "{:output {:analysis true :format :json}}"
+                            "--lang" "cljs"
                             "--lint"] files)
               result (apply jsh/sh args)
               data   (json/parse-string (:out result) true)]
           (->> (get-in data [:analysis :var-usages])
-               (filter (fn [{:keys [to name]}]
-                         (and (contains? #{"cljs.core" "clojure.core"} (str to))
+               (filter (fn [{:keys [to name lang]}]
+                         (and (not= (str lang) "clj")
+                              (contains? #{"cljs.core" "clojure.core"} (str to))
                               (contains? +banned-fns+ (str name)))))
                (map (fn [{:keys [filename row col name]}]
                       {:file    (str/replace (str filename)
@@ -115,16 +146,6 @@
                        :col     col
                        :fn-name (str name)}))
                (sort-by (juxt :file :line))))))))
-
-(defn latest-file [label]
-  (str ".cljs-lite-skill/" label ".latest"))
-
-(defn read-latest [label]
-  (let [f (latest-file label)]
-    (when-not (fs/exists? f)
-      (println (str "ERROR: no slot for label '" label "' — run 'build " label " <build-name>' first."))
-      (System/exit 1))
-    (str/trim (slurp f))))
 
 ;; ---- commands ----
 
@@ -153,9 +174,9 @@
                               (when (:lite-mode opts) "  :lite-mode ✓")
                               (when (:elide-to-string opts) "  :elide-to-string ✓")))))
             (println)
-            (println "Usage: bb lite.bb build <label> <build-name> [cmd-prefix…]")
+            (println "Usage: bb lite.bb build <label> <build-name> [--exp <n>] [cmd-prefix…]")
             (println "  cmd-prefix defaults to: clojure -M -m shadow.cljs.devtools.cli")
-            (println "  example:  bb lite.bb build latest app clojure -M:demo:shadow"))))))
+            (println "  example:  bb lite.bb build advanced app clojure -M:demo:shadow"))))))
 
 (defn run-build! [slot-label compiler-options build-name cmd-prefix]
   (when-not (fs/exists? "shadow-cljs.edn")
@@ -183,17 +204,19 @@
         (println "Cleaned .cljs-lite-skill/"))
     (println "Nothing to clean.")))
 
-(defn build! [label build-name cmd-prefix]
-  (let [sym          (str (gensym nil))
-        measure-slot (str label "-" sym)
-        diag-slot    (str "diag-" sym)]
-    (fs/create-dirs "target/lite-diag")
-    (println (str "Building " build-name " [" sym "] …"))
+(defn build! [label build-name exp-num cmd-prefix]
+  (let [state        (read-state)
+        n            (or exp-num (inc (:latest state)))
+        measure-slot (str label "-" n)
+        diag-slot    (str "diag-" label "-" n)]
+    (println (str "Building " build-name " [exp " n "] …"))
     (println "  [measure]")
     (run-build! measure-slot +measure-compiler-options+ build-name cmd-prefix)
     (println "  [diagnostic]")
     (run-build! diag-slot +diag-compiler-options+ build-name cmd-prefix)
-    (spit (latest-file label) sym)
+    (write-state (-> state
+                     (assoc :latest n)
+                     (assoc-in [n (keyword label)] {:measure measure-slot :diag diag-slot})))
     (println (str "Slots: " measure-slot "  |  " diag-slot))))
 
 (defn analyze-slot
@@ -244,20 +267,24 @@
   (println (str "Names: " (count names))))
 
 (defn check! [label]
-  (let [sym (read-latest label)]
-    (print-check label (analyze-slot (str "diag-" sym)))))
+  (let [{:keys [measure diag]} (get-slots label)
+        n (:latest (read-state))]
+    (println (str "Experiment " n ": measure=" measure " diag=" diag))
+    (print-check label (analyze-slot diag))))
 
 (defn diff! [label-a label-b]
   (when-not (and label-a label-b)
     (println "Usage: bb lite.bb diff <a> <b>")
     (System/exit 1))
-  (let [sym-a     (read-latest label-a)
-        sym-b     (read-latest label-b)
-        measure-a (analyze-slot (str label-a "-" sym-a))
-        measure-b (analyze-slot (str label-b "-" sym-b))
-        diag-a    (analyze-slot (str "diag-" sym-a))
-        diag-b    (analyze-slot (str "diag-" sym-b))]
-    (println (str "\n=== diff: " label-a " [" sym-a "] → " label-b " [" sym-b "] ===\n"))
+  (let [state    (read-state)
+        n        (:latest state)
+        slots-a  (get-slots label-a)
+        slots-b  (get-slots label-b)
+        measure-a (analyze-slot (:measure slots-a))
+        measure-b (analyze-slot (:measure slots-b))
+        diag-a    (analyze-slot (:diag slots-a))
+        diag-b    (analyze-slot (:diag slots-b))]
+    (println (str "\n=== diff [exp " n "]: " label-a " → " label-b " ===\n"))
     ;; size from measure slots
     (let [sa (fs/size (:js-path measure-a))
           sb (fs/size (:js-path measure-b))
@@ -309,25 +336,30 @@
 
 ;; ---- dispatch ----
 
-(defn parse-build-args [args cmd-name]
-  (let [[label build-name & cmd-prefix] args]
+(defn parse-build-args [args]
+  (let [exp-idx (.indexOf (vec args) "--exp")
+        exp-num (when (>= exp-idx 0) (Integer/parseInt (nth (vec args) (inc exp-idx))))
+        args'   (if (>= exp-idx 0)
+                  (into (vec (take exp-idx args)) (drop (+ exp-idx 2) args))
+                  (vec args))
+        [label build-name & cmd-prefix] args']
     (when-not build-name
-      (println (str "Usage: bb lite.bb " cmd-name " <label> <build-name> [cmd-prefix…]"))
+      (println "Usage: bb lite.bb build <label> <build-name> [--exp <n>] [cmd-prefix…]")
       (println "Run 'validate' to see available builds.")
       (System/exit 1))
-    [(or label "latest") build-name cmd-prefix]))
+    [label build-name exp-num cmd-prefix]))
 
 (let [[cmd & args] *command-line-args*]
   (case cmd
     "validate" (validate!)
     "clean"    (clean!)
-    "build"    (let [[label build-name cmd-prefix] (parse-build-args args "build")]
-                 (build! label build-name cmd-prefix))
-    "check"    (check! (or (first args) "latest"))
+    "build"    (let [[label build-name exp-num cmd-prefix] (parse-build-args args)]
+                 (build! label build-name exp-num cmd-prefix))
+    "check"    (check! (or (first args) "advanced"))
     "diff"     (diff! (first args) (second args))
     (println "Usage: bb lite.bb <command> [args...]
-  validate                       list available browser builds
-  clean                          remove all slots (.cljs-lite-skill/)
-  build <label> <build> [cmd…]   compile measure + diagnostic slots linked by gensym
-  check [label]                  analyze diagnostic slot for label (default: latest)
-  diff  <a> <b>                  compare two labels: size from measure, analysis from diag")))
+  validate                                   list available browser builds
+  clean                                      remove all slots (.cljs-lite-skill/)
+  build <label> <build> [--exp <n>] [cmd…]  compile measure + diagnostic slots
+  check [label]                              analyze diagnostic slot for label (default: advanced)
+  diff  <a> <b>                              compare two labels in current experiment")))

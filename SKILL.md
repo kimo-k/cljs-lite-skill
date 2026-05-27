@@ -11,9 +11,13 @@ the actual `cljs/core.cljs` source (read directly; see `types.md`).
 Claims marked ⚠️ are from empirical measurement and may drift across CLJS versions.
 
 When this skill is invoked, run `validate` immediately to check requirements and list
-available shadow-cljs builds. If `.cljs-lite-skill/` exists and contains stale slots,
-run `clean` before building. Then proceed to diagnose the build. Do not ask the user
-what they want — diagnosing the codebase for lite-mode optimization is the task.
+available shadow-cljs builds. Then run `clean` to remove any prior slots. Then proceed
+to diagnose the build. Do not ask the user what they want — diagnosing the codebase for
+lite-mode optimization is the task.
+
+If the user implies source code has changed — even informally ("how about now?", "check
+again, I changed something", "I fixed that", "try it again") — assume they want a full
+rebuild before checking. Do not re-run `check` on stale artifacts.
 
 ---
 
@@ -35,26 +39,39 @@ what they want — diagnosing the codebase for lite-mode optimization is the tas
 bb lite.bb validate
 
 # Build both measure + diagnostic slots in one command:
-bb lite.bb build latest <build-name> [cmd-prefix…]
-# e.g.: bb lite.bb build latest app clojure -M:demo:shadow
+bb lite.bb build advanced <build-name> [cmd-prefix…]
+# e.g.: bb lite.bb build advanced app clojure -M:demo:shadow
 ```
 
-This runs two shadow-cljs release builds linked by a shared gensym (e.g. `1234`):
-- `.cljs-lite-skill/latest-1234/` — measure build: no pseudo-names, accurate production size
-- `.cljs-lite-skill/diag-1234/` — diagnostic build: pseudo-names + source-map, readable names
-- `.cljs-lite-skill/latest.latest` — pointer file containing `1234`
+Each `build` call creates a new experiment (increments `:latest` in `latest.edn`) and
+writes two slots:
+- `.cljs-lite-skill/advanced-<n>/` — measure build: no pseudo-names, accurate production size
+- `.cljs-lite-skill/diag-advanced-<n>/` — diagnostic build: pseudo-names + source-map, readable names
 
-**Never measure size from diagnostic slots.** Pseudo-names inflate the artifact 5-10×. The
-gensym links each pair so `check` and `diff` always use the right slot for each purpose.
+State is tracked in `.cljs-lite-skill/latest.edn`:
+```edn
+{:latest 1
+ 1 {:advanced {:measure "advanced-1" :diag "diag-advanced-1"}}}
+```
+
+Compiler options (`:lite-mode`, `:elide-to-string`, `:pseudo-names`, `:source-map`) are
+injected via `--config-merge` at build time. **Do not tell users to add these to
+`shadow-cljs.edn`** — the build target does not need them and `lite.bb` handles everything.
+
+**Two slots, two purposes — never mix them:**
+- **Size** → always from the measure slot (`<label>-<n>/`). The diag slot is 5-10× larger due to pseudo-names and means nothing.
+- **Inspection** (what's in the build, leaked types, banned functions, reading names) → always from the diag slot (`diag-<label>-<n>/`). The measure slot has fully mangled names that are unreadable.
+
+`check` and `diff` handle this automatically. If you ever read the artifact directly, use the diag slot.
 
 ### Step 2 — Analyse
 
 ```bash
-bb lite.bb check latest
-# (default label is latest, so bare `check` works too)
+bb lite.bb check advanced
+# (default label is advanced, so bare `check` works too)
 ```
 
-Reads `latest.latest` to find the gensym, then analyzes the `diag-<sym>/` slot.
+Looks up the label in the current experiment (`:latest`) from `latest.edn`, then analyzes the diag slot.
 
 Produces a report with four sections:
 
@@ -69,18 +86,26 @@ Produces a report with four sections:
 
 4. **Name count** — total mangled-name count. Fewer names ≈ more DCE.
 
-### Step 2b — A/B comparison
+### Step 2b — Multi-label experiments
+
+The experiment system is not limited to A/B. You can group any number of labeled builds
+into one experiment using `--exp <n>` — useful for comparing three approaches, isolating
+individual fixes, or building a baseline alongside several variants. Pick label names that
+describe what changed.
+
+To compare two builds within the same experiment, pass `--exp <n>` to group them:
 
 ```bash
 bb lite.bb build before <build-name> [cmd-prefix…]
+# note the experiment number printed, e.g. [exp 3]
 # ... make changes ...
-bb lite.bb build after  <build-name> [cmd-prefix…]
+bb lite.bb build after <build-name> --exp 3 [cmd-prefix…]
 bb lite.bb diff before after
 ```
 
-Each `build` creates a linked measure+diagnostic pair. `diff` uses:
-- measure slots (`before-<sym>`, `after-<sym>`) for accurate brotli size delta
-- diagnostic slots (`diag-<sym>`, `diag-<sym>`) for leaked types, banned functions, name count delta
+`diff` looks up both labels in the current experiment (`:latest`). `diff` uses:
+- measure slots (`before-<n>`, `after-<n>`) for accurate brotli size delta
+- diagnostic slots (`diag-before-<n>`, `diag-after-<n>`) for leaked types, banned functions, name count delta
 
 ### Step 3 — Fix
 
@@ -264,6 +289,6 @@ Clojure-readable output (but note: `pr-str` pulls in the printer).
 | `types.md` | Exact data structure implementation reference |
 | `guide.md` | Deep reference with core.cljs line numbers |
 | `setup.md` | How to add diagnostic build to a project |
-| `.cljs-lite-skill/<label>-<sym>/` | Measure slot — production-equivalent size |
-| `.cljs-lite-skill/diag-<sym>/` | Diagnostic slot — pseudo-names, readable names |
-| `.cljs-lite-skill/<label>.latest` | Pointer to current gensym for that label |
+| `.cljs-lite-skill/<label>-<n>/` | Measure slot — production-equivalent size |
+| `.cljs-lite-skill/diag-<label>-<n>/` | Diagnostic slot — pseudo-names, readable names |
+| `.cljs-lite-skill/latest.edn` | State file: experiment history and current `:latest` |
